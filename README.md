@@ -34,10 +34,9 @@ compare-and-swap, no coordinator — which is also why it behaves on Windows, wh
 renaming a directory another process holds a handle inside fails with `EBUSY` and
 stays failed under real contention.
 
-Requires Node 22.6+, which runs `.ts` directly: from a checkout there is no build step,
-no transpiler, and the core imports nothing outside `node:*`. See
-[Installing today](#installing-today-read-this-first) before assuming that survives an
-`npm install`.
+Requires Node 22.6+, which runs `.ts` directly, so working from a checkout needs no
+build step and the core pulls in nothing outside `node:*`. What ships is compiled —
+see [Installing](#installing) for why that distinction was load-bearing here.
 
 ## Command line
 
@@ -73,24 +72,33 @@ And there is no daemon: each agent spawns its own server process, and
 [a real test](test/mcp.test.ts) proves they contend correctly through the filesystem
 rather than through a shared in-process registry.
 
-The MCP SDK is reached only by `src/server.ts`; the library and CLI import nothing but
-`node:*`.
+The MCP SDK is an **optional peer dependency**: only `fencepost/server` reaches it, and
+the library and CLI import nothing outside `node:*`.
 
-## Installing today: read this first
+## Installing
 
-**This package is not published to npm, and it cannot be installed from source as-is.**
-The entry point is TypeScript, and Node refuses to strip types inside `node_modules`
-(`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`) — verified by packing the tarball and
-importing it from a clean consumer. Publishing therefore requires a compile step that
-emits JavaScript plus type declarations first; until that exists, the snippet above
-only works from a checkout, which is how all 36 tests and the benchmark run it.
+Not published to npm yet. The artifact is installable and checked as such: `npm run
+verify:package` packs the tarball, installs it into a throwaway directory **offline**,
+and then uses it the way a stranger would — import from `.mjs`, run the CLI, compile a
+TypeScript consumer against the shipped `.d.ts`. A clean consumer ends up with one
+package and no transitive dependencies.
 
-The same check corrected a claim made here earlier: declaring the SDK under
-`optionalDependencies` does **not** keep it out of an install — npm installs those by
-default, and a clean consumer that pulled `fencepost` ended up with **94 packages** in
-its dependency graph (express, hono, cors, jose, zod and their trees). Making the SDK
-genuinely optional means declaring it as an optional peer dependency, which is not done
-yet.
+That did not use to be true, and the two reasons it was broken are worth recording
+because neither was visible from inside the repository:
+
+- The entry point used to be `src/index.ts`. Node refuses to strip types under
+  `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so the package was
+  unusable once installed while **all 36 in-repo tests passed** — they run against
+  source, not against the artifact. `npm run build` now emits `dist/` with
+  declarations, using `rewriteRelativeImportExtensions` so the source can keep its
+  explicit `.ts` specifiers.
+- The SDK was declared under `optionalDependencies`, which npm installs **by
+  default**: the consumer's tree came back with 94 packages (express, hono, cors,
+  jose, zod). Optional *peer* dependencies with `peerDependenciesMeta.optional` is
+  what actually keeps them out.
+
+Both are asserted by `verify-package.mjs`, so the class of mistake is closed rather
+than the two instances.
 
 ## Measured cost
 
@@ -148,6 +156,7 @@ Read [`docs/`](docs/) before relying on any of it. In short:
 | `src/cli.ts` | command line entry point, no dependencies |
 | `src/server.ts` | MCP server, mediated writes, path confinement |
 | `test/` | contention, hard kill, clock steps, corruption, CLI exit codes, MCP round trip |
+| `test/verify-package.mjs` | installs the built tarball elsewhere and uses it as a stranger would |
 | `bench/` | latency, contention throughput, the two-process wedged-holder comparison, generated results |
 | `docs/` | three design notes: the guarantees, the identity evidence, the server |
 
@@ -155,10 +164,16 @@ Read [`docs/`](docs/) before relying on any of it. In short:
 
 ```sh
 npm install
-npm test        # 36 tests, ~17s
+npm test              # 37 tests, ~17s, runs against source (no build needed)
 npm run typecheck
-npm run bench   # regenerates bench/RESULTS.md, takes ~1min
+npm run build         # emits dist/ (JS + .d.ts) from tsconfig.build.json
+npm run verify:package # packs the tarball, installs it offline, uses it as a stranger
+npm run bench         # regenerates bench/RESULTS.md, takes ~1min
 ```
+
+`prepublishOnly` runs the build and the package verification, so the artifact that gets
+published is the one just proven installable. Once `dist/` exists, `npm test` also picks
+up the compiled-server case, and skips it when it does not.
 
 ## License
 

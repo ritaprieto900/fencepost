@@ -184,3 +184,65 @@ test(
     }
   }
 );
+
+/**
+ * The published server, not the source one.
+ *
+ * Every other test here drives `src/server.ts`, so a build that broke the server --
+ * a rewritten specifier that no longer resolves, a lost shebang, an import the
+ * compiler reordered -- would still ship green. This spawns `dist/server.js` and
+ * runs a real claim and mediated write through it. It skips rather than fails when
+ * dist is absent, because `npm test` is meant to work before `npm run build`.
+ */
+const DIST_SERVER = fileURLToPath(new URL('../dist/server.js', import.meta.url));
+
+async function connectTo(entry: string, store: string, root: string, owner: string): Promise<Client> {
+  const client = new Client({ name: 'fencepost-test', version: '0.0.0' });
+  await client.connect(
+    new StdioClientTransport({
+      command: process.execPath,
+      args: [entry, '--store', store, '--root', root, '--owner', owner],
+      env: getDefaultEnvironment(),
+      cwd: root,
+    })
+  );
+  return client;
+}
+
+test(
+  'the compiled server answers a claim and a mediated write over stdio',
+  { skip: !fs.existsSync(DIST_SERVER) ? 'run `npm run build` first' : false },
+  async () => {
+    const { store, root } = workspace();
+    const client = await connectTo(DIST_SERVER, store, root, 'compiled');
+    try {
+      const taken = await call(client, 'claim', { resource: claim, ttlMs: 30_000 });
+      assert.equal(taken.isError, false, taken.text);
+      const { token } = asJson<{ token: number }>(taken);
+      assert.equal(
+        asJson<{ authorized: boolean }>(await call(client, 'assert', { resource: claim, token })).authorized,
+        true,
+        'the compiled server did not authorize its own fresh claim'
+      );
+
+      const wrote = await call(client, 'write', {
+        resource: claim,
+        token,
+        path: 'gen/0001.sql',
+        content: 'select 1;',
+      });
+      assert.equal(wrote.isError, false, wrote.text);
+      assert.equal(fs.readFileSync(path.join(root, 'gen', '0001.sql'), 'utf8'), 'select 1;');
+
+      const escaped = await call(client, 'write', {
+        resource: claim,
+        token,
+        path: '../outside.txt',
+        content: 'no',
+      });
+      assert.equal(escaped.isError, true, 'the compiled server lost its path confinement');
+    } finally {
+      await client.close();
+    }
+  }
+);

@@ -1,37 +1,73 @@
 {
   "name": "fencepost",
-  "version": "0.0.4",
+  "version": "0.1.0",
   "description": "Leases with fencing tokens for agents sharing one working tree. Windows-safe, no daemon.",
   "type": "module",
   "license": "MIT",
   "engines": {
     "node": ">=22.6.0"
   },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./server": "./src/server.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./package.json": "./package.json"
   },
   "bin": {
-    "fencepost": "./src/cli.ts",
-    "fencepost-server": "./src/server.ts"
+    "fencepost": "./dist/cli.js",
+    "fencepost-server": "./dist/server.js"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "bench": "node bench/bench.ts"
+    "bench": "node bench/bench.ts",
+    "verify:package": "node test/verify-package.mjs",
+    "prepublishOnly": "npm run build && npm run verify:package"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@types/node": "^24.0.0",
-    "proper-lockfile": "^4.1.2",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "zod": "^4.6.5"
+  },
+  "peerDependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    },
+    "zod": {
+      "optional": true
+    }
   },
   "files": [
-    "src",
+    "dist",
     "docs",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
-  "optionalDependencies": {
-    "@modelcontextprotocol/sdk": "^1.31.0",
-    "zod": "^4.6.5"
+  "keywords": [
+    "windows",
+    "file-locking",
+    "distributed-lock",
+    "fencing-token",
+    "lease",
+    "mcp",
+    "ai-agents",
+    "mutual-exclusion"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ritaprieto900/fencepost.git"
   }
 }
