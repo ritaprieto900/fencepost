@@ -31,11 +31,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "bench": "node bench/bench.ts",
     "verify:package": "node test/verify-package.mjs",
-    "prepublishOnly": "npm run build && npm run verify:package"
+    "prepublishOnly": "npm run verify:package"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.31.0",
