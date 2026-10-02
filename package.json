@@ -17,10 +17,12 @@
   },
   "scripts": {
     "test": "node --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bench": "node bench/bench.ts"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "proper-lockfile": "^4.1.2",
     "typescript": "^5.9.0"
   },
   "files": [
