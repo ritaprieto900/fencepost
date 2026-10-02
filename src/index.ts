@@ -18,5 +18,12 @@ export {
   type Store,
 } from './lease.ts';
 
-export { keyOf, normalizeFile, type Resource } from './key.ts';
+export {
+  createResolver,
+  foldLoopbackShare,
+  normalizeSyntax,
+  trimComponentEnds,
+  type Resource,
+  type Resolver,
+} from './identity.ts';
 export type { LeaseRecord } from './record.ts';

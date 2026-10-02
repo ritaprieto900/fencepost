@@ -43,7 +43,7 @@ import {
   writeNew,
   nonce,
 } from './atomic.ts';
-import { keyOf, type Resource } from './key.ts';
+import { createResolver, type Resource, type Resolver } from './identity.ts';
 import { decode, encode, isLive, type LeaseRecord } from './record.ts';
 
 export class LeaseHeldError extends Error {
@@ -80,10 +80,10 @@ export type AcquireOutcome =
 export type Store = {
   root: string;
   claimsRoot: string;
+  /** resolves a resource to the key its claims live under */
+  resolver: Resolver;
   /** injectable, so expiry and clock steps are testable without waiting */
   now: () => number;
-  platform: string;
-  cwd: string;
   /** backoff sleeper; injectable to keep the suite fast */
   pause: (ms: number) => void;
   /** fsync each claim; on by default, off only to make a test fast */
@@ -94,18 +94,18 @@ export function createStore(
   root: string,
   opts: {
     now?: () => number;
-    platform?: string;
     cwd?: string;
+    platform?: string;
     flush?: boolean;
     pause?: (ms: number) => void;
+    realp?: (p: string) => string | null;
   } = {}
 ): Store {
   const s: Store = {
     root,
     claimsRoot: path.join(root, 'claims'),
+    resolver: createResolver({ cwd: opts.cwd, platform: opts.platform, realp: opts.realp }),
     now: opts.now ?? Date.now,
-    platform: opts.platform ?? process.platform,
-    cwd: opts.cwd ?? process.cwd(),
     pause: opts.pause ?? sleep,
     flush: opts.flush ?? true,
   };
@@ -274,7 +274,7 @@ export function tryAcquire(
   resource: Resource,
   opts: AcquireOptions = {}
 ): AcquireOutcome {
-  const key = keyOf(resource, s.cwd, s.platform);
+  const key = s.resolver.key(resource);
   const ttlMs = opts.ttlMs ?? 30_000;
   const owner = opts.owner ?? 'agent';
   const holderId = newHolderId(owner);
@@ -298,7 +298,7 @@ export function tryAcquire(
 export function acquire(s: Store, resource: Resource, opts: AcquireOptions = {}): Lease {
   const out = tryAcquire(s, resource, opts);
   if (!out.ok) {
-    throw new LeaseHeldError(out.heldBy, keyOf(resource, s.cwd, s.platform));
+    throw new LeaseHeldError(out.heldBy, s.resolver.key(resource));
   }
   return out.lease;
 }
@@ -349,7 +349,7 @@ export function renew(s: Store, lease: Lease): RenewOutcome {
  * whether it noticed or not.
  */
 export function check(s: Store, resource: Resource, token: number): boolean {
-  const key = keyOf(resource, s.cwd, s.platform);
+  const key = s.resolver.key(resource);
   const gens = generations(s, key);
   const latest = gens[gens.length - 1];
   if (!latest || latest.seq !== token) return false;
@@ -407,7 +407,7 @@ function sweepByKey(s: Store, key: string): number {
 }
 
 export function sweepStale(s: Store, resource: Resource): number {
-  return sweepByKey(s, keyOf(resource, s.cwd, s.platform));
+  return sweepByKey(s, s.resolver.key(resource));
 }
 
 /** Current fence number and holder, for status output and tests. */
@@ -415,7 +415,7 @@ export function inspect(
   s: Store,
   resource: Resource
 ): { token: number; holder: string | null; live: boolean; expiresAtMs: number | null } {
-  const key = keyOf(resource, s.cwd, s.platform);
+  const key = s.resolver.key(resource);
   const gens = generations(s, key);
   const latest = gens[gens.length - 1];
   return {

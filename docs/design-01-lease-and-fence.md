@@ -121,9 +121,10 @@ refused when it tries to write. Renewing at `ttl/3` keeps the practical window s
   the gate are outside the guarantee.
 - **It assumes both sides agree on resource identity.** Two spellings of one path are one
   resource; if normalization splits them, each gets a lease the library considers
-  uncontested and no fence fixes that. Current normalization folds drive-letter and case
-  on Windows, and does not yet resolve 8.3 short names, junctions and symlinks, or UNC vs
-  drive-letter. See unit 2.
+  uncontested and no fence fixes that, because the fence is per key. This is the one
+  failure mode where unit 1's argument buys nothing, so identity is treated as its own
+  module with its own evidence — see `design-02-resource-identity.md`. Hard links remain
+  ununified there, and are the honest hole.
 - **A hard-killed holder blocks until its ttl elapses.** Nothing inspects the dead
   process — no heartbeat, no exit hook, no pid check. That window is the price of not
   trusting liveness detection, which is why ttl is a tuning knob rather than a formality.

@@ -27,12 +27,15 @@ compare-and-swap, no third-party coordinator — which is also why it behaves on
 where renaming a directory another process holds a handle inside fails with `EBUSY` and
 stays failed under real contention.
 
-**Status: v0.0.1, unit 1.** The lease engine, the fence, and the tests exist. Not published
-to npm, no CLI, no MCP server, no benchmarks, and the path normalization folds drive
-letter and case but does not yet resolve 8.3 short names, junctions, or UNC aliases — so
-two exotic spellings of one file can still each obtain a lease. Read
-[`docs/design-01-lease-and-fence.md`](docs/design-01-lease-and-fence.md) before relying on
-it; it states the guarantees, and the parts that are not guaranteed.
+**Status: v0.0.2, units 1–2.** The lease engine, the fence, resource identity, and the
+tests exist. Not published to npm, no CLI, no MCP server, no benchmarks. Resource identity
+resolves 8.3 short names, junctions, symlinks, `..`, mixed case, trailing dots, the
+extended-length prefix and loopback admin shares down to one key — verified against a real
+NTFS volume. What it still does **not** unify is hard links (see
+[`docs/design-02-resource-identity.md`](docs/design-02-resource-identity.md), which states
+why and what closing it costs), and it is untested on network shares. Read
+[`docs/design-01-lease-and-fence.md`](docs/design-01-lease-and-fence.md) for the safety
+argument and the parts that are not guaranteed.
 
 ## Layout
 
@@ -40,7 +43,7 @@ it; it states the guarantees, and the parts that are not guaranteed.
 | --- | --- |
 | `src/atomic.ts` | the filesystem primitives, restricted to operations Windows promises |
 | `src/record.ts` | claim wire format, and the live/expiry rule |
-| `src/key.ts` | resource identity — the equality test the whole lock rests on |
+| `src/identity.ts` | resource identity — the equality test the whole lock rests on |
 | `src/lease.ts` | the protocol: acquire, renew, release, and the fence gate |
 | `test/` | multi-process contention, hard-kill, clock-step, corruption properties |
 | `docs/` | design notes and stated limits |
@@ -52,7 +55,7 @@ runtime dependency.
 
 ```sh
 npm install
-npm test        # 16 tests, ~8s
+npm test        # 23 tests, ~8s
 npm run typecheck
 ```
 

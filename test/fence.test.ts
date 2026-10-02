@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { acquire, check, createStore, inspect, keyOf, release, sweepStale, tryAcquire } from '../src/index.ts';
+import { acquire, check, createStore, inspect, release, sweepStale, tryAcquire } from '../src/index.ts';
 import { sleep } from '../src/atomic.ts';
 
 type Store = ReturnType<typeof createStore>;
@@ -18,7 +18,7 @@ function fresh(): Store {
 const genName = (seq: number): string => `g${String(seq).padStart(8, '0')}.json`;
 
 function claimDir(s: Store, target: string): string {
-  return path.join(s.root, 'claims', keyOf(lock(target), s.cwd, s.platform));
+  return path.join(s.root, 'claims', s.resolver.key(lock(target)));
 }
 
 function forged(seq: number): string {
