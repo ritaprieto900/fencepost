@@ -1,7 +1,7 @@
 # fencepost
 
 Leases with fencing tokens for agents that share one working tree. Windows-safe,
-no daemon, zero runtime dependencies.
+no daemon, and the core imports nothing outside `node:*`.
 
 Several coding agents editing the same repository need mutual exclusion. The usual
 answer is a lockfile holding a pid, and it fails in a way that is not fixable by
@@ -34,8 +34,10 @@ compare-and-swap, no coordinator — which is also why it behaves on Windows, wh
 renaming a directory another process holds a handle inside fails with `EBUSY` and
 stays failed under real contention.
 
-Requires Node 22.6+, which runs `.ts` directly: no build step, no transpiler, no
-dependencies to audit.
+Requires Node 22.6+, which runs `.ts` directly: from a checkout there is no build step,
+no transpiler, and the core imports nothing outside `node:*`. See
+[Installing today](#installing-today-read-this-first) before assuming that survives an
+`npm install`.
 
 ## Command line
 
@@ -71,8 +73,24 @@ And there is no daemon: each agent spawns its own server process, and
 [a real test](test/mcp.test.ts) proves they contend correctly through the filesystem
 rather than through a shared in-process registry.
 
-The MCP SDK is an `optionalDependency` — `npm install fencepost` for the library does
-not pull a web framework into your project.
+The MCP SDK is reached only by `src/server.ts`; the library and CLI import nothing but
+`node:*`.
+
+## Installing today: read this first
+
+**This package is not published to npm, and it cannot be installed from source as-is.**
+The entry point is TypeScript, and Node refuses to strip types inside `node_modules`
+(`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`) — verified by packing the tarball and
+importing it from a clean consumer. Publishing therefore requires a compile step that
+emits JavaScript plus type declarations first; until that exists, the snippet above
+only works from a checkout, which is how all 36 tests and the benchmark run it.
+
+The same check corrected a claim made here earlier: declaring the SDK under
+`optionalDependencies` does **not** keep it out of an install — npm installs those by
+default, and a clean consumer that pulled `fencepost` ended up with **94 packages** in
+its dependency graph (express, hono, cors, jose, zod and their trees). Making the SDK
+genuinely optional means declaring it as an optional peer dependency, which is not done
+yet.
 
 ## Measured cost
 
