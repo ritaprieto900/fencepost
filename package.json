@@ -1,11 +1,20 @@
 {
   "name": "fencepost",
-  "version": "0.0.2",
-  "description": "Crash-safe leases with fencing tokens for agents sharing one working tree",
+  "version": "0.0.3",
+  "description": "Leases with fencing tokens for agents sharing one working tree. Windows-safe, no daemon.",
   "type": "module",
   "license": "MIT",
-  "engines": { "node": ">=22.6.0" },
-  "exports": { ".": "./src/index.ts" },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts"
+  },
+  "bin": {
+    "fencepost": "./src/cli.ts",
+    "fencepost-server": "./src/server.ts"
+  },
   "scripts": {
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
@@ -14,5 +23,13 @@
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   },
-  "files": ["src", "docs", "README.md"]
+  "files": [
+    "src",
+    "docs",
+    "README.md"
+  ],
+  "optionalDependencies": {
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "zod": "^4.6.5"
+  }
 }

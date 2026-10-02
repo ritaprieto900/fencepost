@@ -64,9 +64,20 @@ export type Lease = {
   resourceKey: string;
   holderId: string;
   owner: string;
+  label: string;
   token: number;
   ttlMs: number;
   expiresAtMs: number;
+};
+
+export type ClaimStatus = {
+  key: string;
+  label: string;
+  token: number;
+  owner: string | null;
+  live: boolean;
+  expiresAtMs: number | null;
+  ttlMs: number | null;
 };
 
 export type RenewOutcome =
@@ -196,7 +207,8 @@ function buildRecord(
   owner: string,
   holderId: string,
   ttlMs: number,
-  nowMs: number
+  nowMs: number,
+  label: string
 ): LeaseRecord {
   return {
     v: 1,
@@ -208,6 +220,7 @@ function buildRecord(
     ttlMs,
     pid: process.pid,
     owner,
+    label,
   };
 }
 
@@ -225,7 +238,14 @@ type Step =
  * our own lease. Renewal asks a different question -- "is the newest claim
  * *mine*?" -- and has its own step below.
  */
-function attempt(s: Store, key: string, ttlMs: number, owner: string, holderId: string): Step {
+function attempt(
+  s: Store,
+  key: string,
+  ttlMs: number,
+  owner: string,
+  holderId: string,
+  label: string
+): Step {
   mkdirExclusive(claimDir(s, key));
 
   const gens = generations(s, key);
@@ -239,7 +259,7 @@ function attempt(s: Store, key: string, ttlMs: number, owner: string, holderId: 
   }
 
   const next = (latest?.seq ?? 0) + 1;
-  const rec = buildRecord(key, next, owner, holderId, ttlMs, s.now());
+  const rec = buildRecord(key, next, owner, holderId, ttlMs, s.now(), label);
   if (createClaim(s, key, next, rec) !== 'created') return { kind: 'retry' };
 
   // One confirmation, so that a returned lease means "we are newest" rather than
@@ -254,6 +274,7 @@ function attempt(s: Store, key: string, ttlMs: number, owner: string, holderId: 
       resourceKey: key,
       holderId,
       owner,
+      label,
       token: next,
       ttlMs,
       expiresAtMs: rec.expiresAtMs,
@@ -275,6 +296,7 @@ export function tryAcquire(
   opts: AcquireOptions = {}
 ): AcquireOutcome {
   const key = s.resolver.key(resource);
+  const label = resource.target;
   const ttlMs = opts.ttlMs ?? 30_000;
   const owner = opts.owner ?? 'agent';
   const holderId = newHolderId(owner);
@@ -283,7 +305,7 @@ export function tryAcquire(
   let lastHeldBy: string | null = null;
 
   for (;;) {
-    const step = attempt(s, key, ttlMs, owner, holderId);
+    const step = attempt(s, key, ttlMs, owner, holderId, label);
     if (step.kind === 'acquired') return { ok: true, lease: step.lease };
     if (step.kind === 'held') lastHeldBy = step.heldBy;
     if (s.now() >= deadline) return { ok: false, heldBy: lastHeldBy };
@@ -322,7 +344,7 @@ export function renew(s: Store, lease: Lease): RenewOutcome {
   if (!liveNow(s, latest)) return { status: 'lost', reason: 'expired' };
 
   const next = latest.seq + 1;
-  const rec = buildRecord(key, next, lease.owner, lease.holderId, lease.ttlMs, s.now());
+  const rec = buildRecord(key, next, lease.owner, lease.holderId, lease.ttlMs, s.now(), lease.label);
   const created = createClaim(s, key, next, rec);
   if (created !== 'created') {
     // A rival claimed the number, or our create did not land. Either way we are
@@ -410,6 +432,19 @@ export function sweepStale(s: Store, resource: Resource): number {
   return sweepByKey(s, s.resolver.key(resource));
 }
 
+/**
+ * The newest claim's record, if it can be read.
+ *
+ * Exposed so a caller holding a token but not the original handle -- an operator
+ * clearing a stuck lease from the command line -- can prove ownership properly.
+ * `release` refuses unless the token *and* the holder id both match the live
+ * claim, and fabricating either half would defeat exactly that check.
+ */
+export function holderOf(s: Store, resource: Resource): LeaseRecord | null {
+  const gens = generations(s, s.resolver.key(resource));
+  return gens[gens.length - 1]?.rec ?? null;
+}
+
 /** Current fence number and holder, for status output and tests. */
 export function inspect(
   s: Store,
@@ -449,6 +484,32 @@ export function heartbeat(
   // A heartbeat must not be the reason a process lingers.
   timer.unref?.();
   return () => clearInterval(timer);
+}
+
+/**
+ * Every resource with a claim on it, whether it is currently held, and by whom.
+ *
+ * Reads the store directly rather than keeping a registry, because a registry
+ * would be a second copy of the truth -- and the disagreement between a registry
+ * and the claims would be resolved by whichever one you got to first.
+ */
+export function listClaims(s: Store): ClaimStatus[] {
+  const out: ClaimStatus[] = [];
+  for (const key of listDir(s.claimsRoot)) {
+    const gens = generations(s, key);
+    const latest = gens[gens.length - 1];
+    out.push({
+      key,
+      label: latest?.rec?.label ?? '(unreadable claim)',
+      token: latest?.seq ?? 0,
+      owner: latest?.rec?.owner ?? null,
+      live: liveNow(s, latest),
+      expiresAtMs: latest?.rec?.expiresAtMs ?? null,
+      ttlMs: latest?.rec?.ttlMs ?? null,
+    });
+  }
+  out.sort((a, b) => a.label.localeCompare(b.label));
+  return out;
 }
 
 /** Run `fn` while holding a lease on `resource`, releasing on any outcome. */

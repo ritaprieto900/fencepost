@@ -22,6 +22,17 @@ export type LeaseRecord = {
   /** diagnostics only -- never a safety input */
   pid: number;
   owner: string;
+  /**
+   * The resource as its holder spelled it, for `status` only.
+   *
+   * Keys are hashes, and hashing is exactly what makes two spellings collapse --
+   * so the key cannot be walked back to a path a human can read. Keeping a label
+   * alongside it costs one field and means a person debugging a stuck lease sees
+   * `db:migrations` instead of `7f3a9c...`. Never an input to identity or to the
+   * fence: a holder is free to mislabel its own resource, and it still contends
+   * correctly, because the key is what decides.
+   */
+  label?: string;
 };
 
 export function encode(rec: LeaseRecord): string {

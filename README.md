@@ -1,61 +1,115 @@
 # fencepost
 
-Crash-safe leases with fencing tokens, for agents that share one working tree.
+Leases with fencing tokens for agents that share one working tree. Windows-safe,
+no daemon, zero runtime dependencies.
 
-Several coding agents editing the same repository need mutual exclusion. The usual answer
-is a lockfile holding a pid, and it fails in a way that is not fixable by better stale
-detection: after a takeover, the evicted holder keeps everything it needs to write, and
-nothing is in a position to refuse it. `fencepost` gives every claim a strictly increasing
-number, and refuses any operation carrying a number that is no longer current — so a
-holder that was declared dead, was written around, and then woke up cannot land a write.
+Several coding agents editing the same repository need mutual exclusion. The usual
+answer is a lockfile holding a pid, and it fails in a way that is not fixable by
+better stale detection: after a takeover, the evicted holder keeps everything it
+needs to write and nothing is in a position to refuse it. `fencepost` gives every
+claim a strictly increasing number and refuses any operation carrying a number that
+is no longer current — so a holder that was declared dead, was written around, and
+then woke up cannot land a write.
+
+## Library
 
 ```ts
 import { createStore, acquire, check, release } from 'fencepost';
 
 const store = createStore('.fencepost');
-const migration = { kind: 'lock', target: 'db:migrations' } as const;
+const migrations = { kind: 'lock', target: 'db:migrations' } as const;
 
-const lease = acquire(store, migration, { ttlMs: 30_000, owner: 'claude-code' });
-if (check(store, migration, lease.token)) {
-  // the only party whose write is authorized
+const lease = acquire(store, migrations, { ttlMs: 30_000, owner: 'claude-code' });
+try {
+  if (check(store, migrations, lease.token)) {
+    // the only party whose write is authorized
+  }
+} finally {
+  release(store, lease);
 }
-release(store, lease);
 ```
 
 Every protocol step is an exclusive file creation. No rename, no replace, no
-compare-and-swap, no third-party coordinator — which is also why it behaves on Windows,
-where renaming a directory another process holds a handle inside fails with `EBUSY` and
+compare-and-swap, no coordinator — which is also why it behaves on Windows, where
+renaming a directory another process holds a handle inside fails with `EBUSY` and
 stays failed under real contention.
 
-**Status: v0.0.2, units 1–2.** The lease engine, the fence, resource identity, and the
-tests exist. Not published to npm, no CLI, no MCP server, no benchmarks. Resource identity
-resolves 8.3 short names, junctions, symlinks, `..`, mixed case, trailing dots, the
-extended-length prefix and loopback admin shares down to one key — verified against a real
-NTFS volume. What it still does **not** unify is hard links (see
-[`docs/design-02-resource-identity.md`](docs/design-02-resource-identity.md), which states
-why and what closing it costs), and it is untested on network shares. Read
-[`docs/design-01-lease-and-fence.md`](docs/design-01-lease-and-fence.md) for the safety
-argument and the parts that are not guaranteed.
+Requires Node 22.6+, which runs `.ts` directly: no build step, no transpiler, no
+dependencies to audit.
+
+## Command line
+
+The CLI imports nothing but `node:*`, so an agent that can only shell out gets the
+whole protocol.
+
+```sh
+fencepost claim  --lock db:migrations --ttl 30000   # prints a token; exit 3 if held
+fencepost check  --lock db:migrations 17
+fencepost run    --lock db:migrations -- npx prisma migrate deploy
+fencepost status
+```
+
+`run` holds and renews for the child's entire lifetime and propagates its exit code.
+A token from `claim` is kept only until its ttl, because the CLI process exits and
+nothing renews it — that is the protocol working as designed rather than a gap: a
+lease is only as alive as the process keeping it.
+
+Exit codes: `0` success, `1` error, `3` held or stale token.
+
+## MCP server
+
+```json
+{ "mcpServers": { "fencepost": { "command": "fencepost-server", "args": ["--root", "/path/to/project"] } } }
+```
+
+Tools: `claim`, `assert`, `renew`, `release`, `write`, `status`.
+
+Two things this earns over the library alone. `write` verifies the token, resolves
+the target, and verifies again immediately before writing, so the check-then-write
+window sits on the authority's side of the boundary instead of being hoped about.
+And there is no daemon: each agent spawns its own server process, and
+[a real test](test/mcp.test.ts) proves they contend correctly through the filesystem
+rather than through a shared in-process registry.
+
+The MCP SDK is an `optionalDependency` — `npm install fencepost` for the library does
+not pull a web framework into your project.
+
+## What is not guaranteed
+
+Read [`docs/`](docs/) before relying on any of it. In short:
+
+- **Writes that bypass the gate are outside the guarantee.** An agent editing with
+  its own tool is not stopped by a fence it never consulted.
+- **A hard-killed holder blocks the resource until its ttl expires.** Nothing
+  inspects the dead process — no heartbeat, no exit hook, no pid check — because
+  liveness detection is the thing this design refuses to trust. ttl is a tuning knob,
+  not a formality.
+- **Hard links are two identities.** `realpath` does not unify them while `stat`
+  reports one `(dev, ino)` pair, so the true identity is available and unused.
+  Closing it needs multi-key acquisition, which rewrites every signature in
+  `lease.ts`; it is deferred on budget, not on knowledge, and a test pins the current
+  behaviour so the docs must change along with the fix.
+- **Network shares are untested**, and a clock that steps *forwards* can expire a
+  lease early — the fence is what makes that survivable, not the clock logic.
 
 ## Layout
 
 | path | what it holds |
 | --- | --- |
-| `src/atomic.ts` | the filesystem primitives, restricted to operations Windows promises |
+| `src/atomic.ts` | filesystem primitives, restricted to operations Windows promises |
 | `src/record.ts` | claim wire format, and the live/expiry rule |
 | `src/identity.ts` | resource identity — the equality test the whole lock rests on |
 | `src/lease.ts` | the protocol: acquire, renew, release, and the fence gate |
-| `test/` | multi-process contention, hard-kill, clock-step, corruption properties |
-| `docs/` | design notes and stated limits |
+| `src/cli.ts` | command line entry point, no dependencies |
+| `src/server.ts` | MCP server, mediated writes, path confinement |
+| `test/` | contention, hard kill, clock steps, corruption, CLI exit codes, MCP round trip |
+| `docs/` | three design notes: the guarantees, the identity evidence, the server |
 
-## Running it
-
-Requires Node 22.6 or newer; it runs `.ts` directly, so there is no build step and no
-runtime dependency.
+## Development
 
 ```sh
 npm install
-npm test        # 23 tests, ~8s
+npm test        # 33 tests, ~15s
 npm run typecheck
 ```
 

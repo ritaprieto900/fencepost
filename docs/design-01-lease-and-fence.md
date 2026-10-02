@@ -116,9 +116,9 @@ refused when it tries to write. Renewing at `ttl/3` keeps the practical window s
 
 - **It does not make the check-then-write sequence atomic.** `check(token)` followed by an
   edit still has a window. Shrinking it requires the *resource* to reject stale tokens,
-  which is the argument for the next unit: when writes go through the server that owns the
-  fence, the window closes instead of merely narrowing. Until then, callers that bypass
-  the gate are outside the guarantee.
+  which is the argument for the server added in unit 3: when writes go through the
+  process that owns the fence, the window closes instead of merely narrowing. Until
+  then, callers that bypass the gate are outside the guarantee.
 - **It assumes both sides agree on resource identity.** Two spellings of one path are one
   resource; if normalization splits them, each gets a lease the library considers
   uncontested and no fence fixes that, because the fence is per key. This is the one
