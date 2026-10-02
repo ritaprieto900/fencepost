@@ -77,14 +77,19 @@ the library and CLI import nothing outside `node:*`.
 
 ## Installing
 
-Not published to npm yet. The artifact is installable and checked as such: `npm run
-verify:package` packs the tarball, installs it into a throwaway directory **offline**,
-and then uses it the way a stranger would — import from `.mjs`, run the CLI, compile a
-TypeScript consumer against the shipped `.d.ts`. A clean consumer ends up with one
-package and no transitive dependencies.
+```sh
+npm install fencepost
+```
 
-That did not use to be true, and the two reasons it was broken are worth recording
-because neither was visible from inside the repository:
+[![npm](https://img.shields.io/npm/v/fencepost)](https://www.npmjs.com/package/fencepost)
+
+Installs with **zero transitive dependencies** — the MCP SDK is an optional peer, so a
+consumer that never imports `fencepost/server` never sees express, hono, cors or zod.
+`npm run verify:package` proves the artifact rather than the source: it packs the
+tarball, installs it into a throwaway directory offline, imports it from `.mjs`, runs
+the installed CLI, and compiles a TypeScript consumer against the shipped `.d.ts`.
+
+Getting it installable took two fixes that were invisible from inside the repository:
 
 - The entry point used to be `src/index.ts`. Node refuses to strip types under
   `node_modules` (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), so the package was
