@@ -264,6 +264,46 @@ check('the installed CLI runs and returns valid JSON', () => {
   return `fencepost status --json -> ${out}`;
 });
 
+/**
+ * The `.bin` shim, not the file path.
+ *
+ * Running `node .../dist/cli.js` proves nothing about `npx fencepost`: npm builds
+ * those shims from the `bin` field, and a publish can *silently drop* bin entries
+ * (npm warns "script name … was invalid and removed" and continues) which would
+ * leave a package whose CLI exists on disk but has no command. The check below is
+ * what catches that, and it is the difference between "the file is there" and
+ * "the user can type the thing we documented".
+ */
+check('npx exposes the fencepost command, not just the file', () => {
+  const binDir = path.join(consumer, 'node_modules', '.bin');
+  if (!fs.existsSync(binDir)) throw new Error('no node_modules/.bin — no command shims were created');
+  const shims = fs.readdirSync(binDir).map((n) => n.replace(/\.cmd$/, ''));
+  for (const wanted of ['fencepost', 'fencepost-server']) {
+    if (!shims.includes(wanted)) {
+      throw new Error(`.bin is missing "${wanted}" (have: ${shims.join(', ') || 'nothing'}) — the published bin field was stripped`);
+    }
+  }
+  // And the shim must actually execute, not merely exist. On Windows the shim is
+  // a `.cmd`, which `spawnSync` cannot launch without a shell -- PATHEXT is not
+  // consulted -- so the shell flag is set there and the path is quoted, since the
+  // temp directory is not guaranteed to be space-free.
+  const shim = path.join(binDir, process.platform === 'win32' ? 'fencepost.cmd' : 'fencepost');
+  const viaShim = spawnSync(`"${shim}"`, ['status', '--json'], {
+    cwd: consumer,
+    encoding: 'utf8',
+    shell: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (viaShim.error) throw new Error(`shim would not run: ${viaShim.error.message}`);
+  if (viaShim.status !== 0) {
+    throw new Error(
+      `shim exited ${viaShim.status}: ${((viaShim.stderr || viaShim.stdout) ?? '').split('\n').slice(0, 3).join(' / ')}`
+    );
+  }
+  JSON.parse(viaShim.stdout.trim() || '[]');
+  return `.bin has ${shims.join(', ')}; the fencepost shim ran and returned JSON`;
+});
+
 check('a TypeScript consumer resolves and is actually constrained by the published types', () => {
   const TSC = path.join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
   const write = (name, body, file) => {

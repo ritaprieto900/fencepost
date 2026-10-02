@@ -1,6 +1,6 @@
 {
   "name": "fencepost",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Leases with fencing tokens for agents sharing one working tree. Windows-safe, no daemon.",
   "type": "module",
   "license": "MIT",
@@ -21,8 +21,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "fencepost": "./dist/cli.js",
-    "fencepost-server": "./dist/server.js"
+    "fencepost": "dist/cli.js",
+    "fencepost-server": "dist/server.js"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
