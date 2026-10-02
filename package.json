@@ -76,5 +76,9 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ritaprieto900/fencepost.git"
+  },
+  "author": {
+    "name": "ritaprieto900",
+    "url": "https://github.com/ritaprieto900"
   }
 }
