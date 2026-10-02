@@ -32,10 +32,29 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
  */
 const NPM_CLI = path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
 
+/**
+ * npm configuration that must not leak into the commands this harness runs.
+ *
+ * Found the hard way: `npm publish --dry-run` exports `npm_config_dry_run=true` to
+ * its lifecycle scripts, and a nested `npm pack` then *reports* a tarball without
+ * writing one. The check failed with "produced no fencepost-*.tgz" while stdout
+ * named the file exactly -- an artifact that looks present and is absent, which is
+ * the worst possible shape for a packaging test. `npm_config_json` is dropped for
+ * the same class of reason: it would reformat stdout that other code reads.
+ */
+const INHERITED_CONFIG = ['npm_config_dry_run', 'npm_config_json', 'npm_config_production', 'npm_config_offline'];
+
+function childEnv() {
+  const env = { ...process.env };
+  for (const key of INHERITED_CONFIG) delete env[key];
+  return env;
+}
+
 function npm(args, cwd) {
   const r = spawnSync(process.execPath, [NPM_CLI, ...args], {
     cwd,
     encoding: 'utf8',
+    env: childEnv(),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   if (r.error) throw new Error(`npm ${args.join(' ')}: ${r.error.message}`);
@@ -91,9 +110,44 @@ function setup() {
   );
   if (built.status !== 0) throw new Error(`build failed:\n${built.stdout.split('\n').slice(0, 8).join('\n')}`);
 
-  const listing = npm(['pack', '--pack-destination', work, '--silent'], ROOT).trim().split('\n').pop();
-  tarball = path.join(work, listing);
-  if (!fs.existsSync(tarball)) throw new Error(`npm pack reported "${listing}" which is not on disk`);
+  const startedAt = Date.now();
+  // Remove anything pack-shaped first: "find the newest tarball" is only evidence
+  // if there is no older one to find.
+  for (const dir of [work, ROOT]) {
+    try {
+      for (const n of fs.readdirSync(dir)) {
+        if (/^fencepost-\d.*\.tgz$/.test(n)) fs.rmSync(path.join(dir, n), { force: true });
+      }
+    } catch {
+      /* dir unreadable, nothing to remove */
+    }
+  }
+
+  const listing = npm(['pack', '--pack-destination', work, '--silent'], ROOT);
+  // Do not take the filename from stdout. `npm pack` prints the name after a block
+  // of `npm notice` lines, and under the publish lifecycle that output is not
+  // shaped the same way as it is when run by hand -- which is how this check came
+  // to report "fencepost-0.1.0.tgz which is not on disk" while the tarball had in
+  // fact been written. Where the artifact *is* is a filesystem question, so it gets
+  // answered by looking at the filesystem.
+  const candidates = [work, ROOT]
+    .flatMap((dir) => {
+      try {
+        return fs.readdirSync(dir).filter((n) => /^fencepost-\d.*\.tgz$/.test(n)).map((n) => path.join(dir, n));
+      } catch {
+        return [];
+      }
+    })
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+
+  if (candidates.length === 0) {
+    throw new Error(`npm pack produced no fencepost-*.tgz in ${work} or ${ROOT}\nstdout was:\n${listing.split('\n').slice(0, 8).join('\n')}`);
+  }
+  // Written by this run, not left over from something older.
+  if (fs.statSync(candidates[0]).mtimeMs < startedAt - 2_000) {
+    throw new Error(`found ${candidates[0]} but it predates this run`);
+  }
+  tarball = candidates[0];
 
   fs.mkdirSync(consumer);
   fs.writeFileSync(
@@ -264,6 +318,15 @@ check('LICENSE and README ship inside the package', () => {
 /* ------------------------------------------------------------------ report */
 
 fs.rmSync(work, { recursive: true, force: true });
+// If pack wrote into the repository rather than the scratch dir, do not leave the
+// tarball lying there for the next person to find in `git status`.
+try {
+  for (const n of fs.readdirSync(ROOT)) {
+    if (/^fencepost-\d.*\.tgz$/.test(n)) fs.rmSync(path.join(ROOT, n), { force: true });
+  }
+} catch {
+  /* nothing to clean */
+}
 const failed = results.filter((r) => !r.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
 if (failed.length > 0) {

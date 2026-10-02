@@ -24,6 +24,11 @@
     "fencepost": "./dist/cli.js",
     "fencepost-server": "./dist/server.js"
   },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public",
+    "provenance": false
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "node --test test/*.test.ts",
