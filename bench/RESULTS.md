@@ -9,7 +9,7 @@ platform    win32 10.0.26300 (x64)
 cpu         Intel(R) Core(TM) Ultra 9 185H x 22
 memory      31.4 GB
 tmp volume  C:\Users\34964\AppData\Local\Temp
-date        2026-10-02T10:56:25.453Z
+date        2026-10-02T12:26:52.708Z
 iterations  400 per row, 40 warmup (150 for the async incumbent row)
 ```
 
@@ -21,29 +21,29 @@ All times in microseconds unless the cell says `ms`.
 
 | operation | p50 | p95 | p99 | min | max |
 | --- | --- | --- | --- | --- | --- |
-| check (fence gate read) | 78 | 212 | 622 | 63 | 827 |
-| renew (self-supersede) | 7935 | 10483 | 11627 | 6868 | 19060 |
-| acquire + release (cold resource) | 4832 | 6147 | 6842 | 3618 | 7835 |
-| claim refused while held | 782 | 782 | 782 | 782 | 782 |
+| check (fence gate read) | 75 | 126 | 223 | 60 | 461 |
+| renew (self-supersede) | 7370 | 10232 | 11216 | 6682 | 13964 |
+| acquire + release (cold resource) | 3762 | 4250 | 4801 | 3436 | 5342 |
+| claim refused while held | 462 | 462 | 462 | 462 | 462 |
 
 ### fsync off (process-crash safe only)
 
 | operation | p50 | p95 | p99 | min | max |
 | --- | --- | --- | --- | --- | --- |
-| check (fence gate read) | 110 | 268 | 462 | 58 | 516 |
-| renew (self-supersede) | 2616 | 4236 | 5038 | 1452 | 6017 |
-| acquire + release (cold resource) | 1575 | 2382 | 3203 | 819 | 25670 |
-| claim refused while held | 701 | 701 | 701 | 701 | 701 |
+| check (fence gate read) | 62 | 94 | 322 | 56 | 868 |
+| renew (self-supersede) | 1668 | 2177 | 2955 | 1367 | 3230 |
+| acquire + release (cold resource) | 964 | 1411 | 1954 | 807 | 19074 |
+| claim refused while held | 327 | 327 | 327 | 327 | 327 |
 
 ### proper-lockfile (the incumbent)
 
 | operation | p50 | p95 | p99 | min | max |
 | --- | --- | --- | --- | --- | --- |
-| lock + unlock (their API) | 1173 | 1804 | 2464 | 965 | 2750 |
+| lock + unlock (their API) | 589 | 776 | 851 | 460 | 1301 |
 
 Observations from its own API surface:
 
-- `proper-lockfile` locking a **not-yet-existing** file with default options: rejected: ENOENT: no such file or directory, lstat 'C:\Users\34964\AppData\Local\Temp\fp-bench-incumbent-7lfwGv\about-to-be-created.txt'.
+- `proper-lockfile` locking a **not-yet-existing** file with default options: rejected: ENOENT: no such file or directory, lstat 'C:\Users\34964\AppData\Local\Temp\fp-bench-incumbent-HZhxek\about-to-be-created.txt'.
 - `stale` has a **minimum of 5000ms** in their API, so 5s is the fastest takeover window they will accept.
 
 ## Contention throughput
@@ -54,10 +54,10 @@ until contention overhead dominates.
 
 | workers | rounds each | total ops | ops | seconds/op |
 | --- | --- | --- | --- | --- |
-| 2 | 60 | 120 | 120 | 73.7 | 13.58 |
-| 4 | 30 | 120 | 120 | 71.1 | 14.06 |
-| 8 | 15 | 120 | 120 | 68.0 | 14.71 |
-| 16 | 8 | 128 | 128 | 60.6 | 16.49 |
+| 2 | 60 | 120 | 120 | 83.5 | 11.97 |
+| 4 | 30 | 120 | 120 | 71.3 | 14.03 |
+| 8 | 15 | 120 | 120 | 78.1 | 12.80 |
+| 16 | 8 | 128 | 128 | 67.6 | 14.80 |
 
 ## The wedged-holder comparison
 
@@ -86,9 +86,9 @@ written around, and then resumes and does something.
 
 ## What the safety costs
 
-Stated plainly, because a comparison that only ever shows the favourable half is not a comparison: the incumbent did `lock + unlock` in **1.17 ms** p50 while a fenced `acquire + release` took **4.83 ms** with claims flushed (and **1.57 ms** with `flush: false`). A lease here is a directory of immutable claims, each one created exclusively, plus a tombstone on release and a directory scan on every read -- that is what buys the refusal-at-write-time property, and it is roughly an order of magnitude more expensive than a lockfile whose answer is only "is something stale-looking sitting here". The gate read is the cheap part, at **0.08 ms** p50, because it only looks.
+Stated plainly, because a comparison that only ever shows the favourable half is not a comparison: the incumbent did `lock + unlock` in **0.59 ms** p50 while a fenced `acquire + release` took **3.76 ms** with claims flushed (and **0.96 ms** with `flush: false`). A lease here is a directory of immutable claims, each one created exclusively, plus a tombstone on release and a directory scan on every read -- that is what buys the refusal-at-write-time property, and it is roughly an order of magnitude more expensive than a lockfile whose answer is only "is something stale-looking sitting here". The gate read is the cheap part, at **0.07 ms** p50, because it only looks.
 
 Two consequences, both worth internalizing:
 
-- One hot resource serialized to **61-74 operations per second** across the concurrency levels above. This is a tool for claiming a migration or a port, not for guarding an inner loop; nobody should put it in a per-file write path at this cost.
+- One hot resource serialized to **68-84 operations per second** across the concurrency levels above. This is a tool for claiming a migration or a port, not for guarding an inner loop; nobody should put it in a per-file write path at this cost.
 - The tombstone written on release is deliberately **not** flushed, while every claim is. That asymmetry is already reflected in the numbers above; why it is safe, and why a claim losing its flush is not, is argued in `docs/design-01-lease-and-fence.md` under "Which fsyncs are load-bearing" and pinned by `test/durability.test.ts`. No before/after figure is restated here, because this file cannot measure the old code -- and a typed number inside a generated document is exactly the rot the generated document exists to avoid.
