@@ -113,7 +113,7 @@ function tempDir(prefix: string): string {
 
 /* -------------------------------------------------------------------- latencies */
 
-function latencySuite(flush: boolean): { label: string; rows: string[]; note: string } {
+function latencySuite(flush: boolean): { label: string; rows: string[]; cold: number; gate: number } {
   const root = tempDir(`bench-flush${flush ? 'on' : 'off'}`);
   const store: Store = createStore(root, { flush });
   const rows: string[] = [];
@@ -122,16 +122,18 @@ function latencySuite(flush: boolean): { label: string; rows: string[]; note: st
 
   let held = fresh();
   let heldLease = acquire(store, held, { ttlMs: 600_000 });
-  rows.push(row('check (fence gate read)', sample(() => check(store, held, heldLease.token))));
+  const gate = sample(() => check(store, held, heldLease.token));
+  rows.push(row('check (fence gate read)', gate));
   rows.push(row('renew (self-supersede)', sample(() => {
     const l = acquire(store, fresh(), { ttlMs: 600_000 });
     renew(store, l);
     release(store, l);
   })));
-  rows.push(row('acquire + release (cold resource)', sample(() => {
+  const cold = sample(() => {
     const l = acquire(store, fresh(), { ttlMs: 60_000 });
     release(store, l);
-  })));
+  });
+  rows.push(row('acquire + release (cold resource)', cold));
   const t0 = process.hrtime.bigint();
   const contested = tryAcquire(store, held, { ttlMs: 60_000, waitMs: 0 });
   const refusedIn = Number(process.hrtime.bigint() - t0) / 1e3;
@@ -143,15 +145,17 @@ function latencySuite(flush: boolean): { label: string; rows: string[]; note: st
   return {
     label: flush ? 'fsync on (durable across power loss)' : 'fsync off (process-crash safe only)',
     rows,
-    note: '',
+    cold: cold.p50,
+    gate: gate.p50,
   };
 }
 
 /* ---------------------------------------------------------------- contention */
 
-async function contentionSuite(): Promise<{ rows: string[]; notes: string[] }> {
+async function contentionSuite(): Promise<{ rows: string[]; notes: string[]; rates: number[] }> {
   const rows: string[] = [];
   const notes: string[] = [];
+  const rates: number[] = [];
   for (const workers of [2, 4, 8, 16]) {
     const root = tempDir('bench-contend');
     const rounds = Math.max(8, Math.round(120 / workers));
@@ -192,17 +196,18 @@ async function contentionSuite(): Promise<{ rows: string[]; notes: string[] }> {
     }
 
     const total = workers * rounds;
+    rates.push(total / seconds);
     rows.push(
       `| ${workers} | ${rounds} | ${total} | ${total.toFixed(0)} | ${(total / seconds).toFixed(1)} | ${((seconds / total) * 1000).toFixed(2)} |`
     );
     fs.rmSync(root, { recursive: true, force: true });
   }
-  return { rows, notes };
+  return { rows, notes, rates };
 }
 
 /* --------------------------------------------------- incumbent: proper-lockfile */
 
-async function incumbentLatency(): Promise<{ rows: string[]; notes: string[] }> {
+async function incumbentLatency(): Promise<{ rows: string[]; notes: string[]; p50: number }> {
   const lockfile = await import('proper-lockfile');
   const lock = lockfile.default ?? lockfile;
   const root = tempDir('bench-incumbent');
@@ -213,10 +218,11 @@ async function incumbentLatency(): Promise<{ rows: string[]; notes: string[] }> 
   const target = path.join(root, `f${seq++}.txt`);
   fs.writeFileSync(target, 'x');
 
-  rows.push(row('lock + unlock (their API)', await sampleAsync(async () => {
+  const theirRoundTrip = await sampleAsync(async () => {
     const rel = await lock.lock(target);
     await rel();
-  })));
+  });
+  rows.push(row('lock + unlock (their API)', theirRoundTrip));
 
   // The head-to-head that is not about speed: their own README states that with
   // `realpath: true` (the default) "the file must exist previously". Claiming a
@@ -236,7 +242,7 @@ async function incumbentLatency(): Promise<{ rows: string[]; notes: string[] }> 
   notes.push('- `stale` has a **minimum of 5000ms** in their API, so 5s is the fastest takeover window they will accept.');
 
   fs.rmSync(root, { recursive: true, force: true });
-  return { rows, notes };
+  return { rows, notes, p50: theirRoundTrip.p50 };
 }
 
 async function sampleAsync(fn: () => Promise<unknown>): Promise<Samples> {
@@ -267,6 +273,10 @@ async function sampleAsync(fn: () => Promise<unknown>): Promise<Samples> {
  */
 async function wedgedHolderSuite(): Promise<string[]> {
   const lines: string[] = [];
+  // Captured from the incumbent run so the interpretation below is built from
+  // what was printed rather than from a sentence written in advance.
+  let incomingRival = '';
+  let incomingHolder = '';
 
   // --- fencepost: 5s ttl, wedged 9s, successor in another process
   {
@@ -337,6 +347,9 @@ async function wedgedHolderSuite(): Promise<string[]> {
     if (holder.exitCode === null) holder.kill('SIGKILL');
     if (rival.exitCode === null) rival.kill('SIGKILL');
 
+    incomingRival = rivalOut;
+    incomingHolder = pick(holderOut, 'COMPROMISED=');
+
     lines.push(
       `**proper-lockfile** — holder locked with \`stale: 5000, update: 1000\`, then wedged its event loop 9s; ` +
         `rival locked the same path while it was wedged and held on. ` +
@@ -346,22 +359,44 @@ async function wedgedHolderSuite(): Promise<string[]> {
     fs.rmSync(root, { recursive: true, force: true });
   }
 
-  lines.push(
-    '_Reading, not measurement:_ read the two lines above as one sequence. The rival took the ' +
-    'lock while the original holder was wedged, so for a window two processes both believed they ' +
-    'held the path; then the original holder resumed, was never told (`COMPROMISED=false`), and its ' +
-    '`release()` deleted the lockfile that belonged to the rival (`BEFORE=true AFTER=false`) -- ' +
-    'unlocking a resource it no longer held, while the live holder kept believing it was protected. ' +
-    'Nothing in that sequence is a bug in `proper-lockfile` that its maintainers deny: their own ' +
-    'README lists "updates take longer than expected, possibly causing the lock to become stale" as ' +
-    'a known cause of two locks on one file. It is the reason a fence token exists. A holder ' +
-    'carrying a generation number has nothing equivalent to do: the successor\'s number is higher, ' +
-    'so the wedged holder\'s write is refused at the gate and its release is a no-op, whether or not ' +
-    'it ever learns what happened. The asymmetry is not that one detects staleness and the other ' +
-    'does not -- it is *when* a stale holder is stopped: at its next refresh, or at the write itself.'
-  );
+  lines.push('_Reading, not measurement:_ ' + describeWedge(incomingRival, incomingHolder));
 
   return lines;
+}
+
+/**
+ * Interpret the incumbent run from what it actually printed, so the prose cannot
+ * drift out of sync with the measurement above it. A fixed sentence here once
+ * asserted a result while the code producing it was measuring something else
+ * entirely -- the same failure as a typed number, one floor up.
+ */
+function describeWedge(rivalLine: string, holderLine: string): string {
+  const tookOver = rivalLine.includes('STOLEN');
+  const told = holderLine.includes('COMPROMISED=true');
+  const lockfileRemoved =
+    holderLine.includes('LOCKFILE_BEFORE=true') && holderLine.includes('LOCKFILE_AFTER=false');
+
+  const parts: string[] = [
+    tookOver
+      ? 'the rival entered while the original holder was wedged, so for a window two processes both believed they held the path'
+      : 'the rival was kept out, so this run did not produce two concurrent holders',
+    told
+      ? 'the original holder was told on resume (onCompromised fired)'
+      : 'the original holder was never told (`COMPROMISED=false` above)',
+    lockfileRemoved
+      ? 'and its `release()` removed the lockfile belonging to the rival -- unlocking a resource it no longer held, while the live holder kept believing it was protected'
+      : 'and its `release()` did not remove a lock it no longer owned',
+  ];
+
+  return (
+    parts.join('; ') + '. ' +
+    'None of this is a bug that `proper-lockfile` denies: its own README lists "updates take ' +
+    'longer than expected, possibly causing the lock to become stale" as a known route to two ' +
+    'locks on one file. What a fence changes is *when* a stale holder is stopped. A generation ' +
+    'number is presented at the write, so a superseded holder is refused there whether or not it ' +
+    'ever notices; an mtime is consulted on the refresh schedule, so a holder that mutates before ' +
+    'its next refresh has nothing to check against.'
+  );
 }
 
 /* ----------------------------------------------------------------------- emit */
@@ -389,7 +424,9 @@ async function main(): Promise<void> {
   out.push('');
   out.push('## Latency');
   out.push('');
-  for (const suite of [latencySuite(true), latencySuite(false)]) {
+  const durable = latencySuite(true);
+  const volatile = latencySuite(false);
+  for (const suite of [durable, volatile]) {
     out.push(`### ${suite.label}`);
     out.push('');
     out.push('| operation | p50 | p95 | p99 | min | max |');
@@ -435,8 +472,11 @@ async function main(): Promise<void> {
   out.push('');
   out.push('## Read these numbers with');
   out.push('');
-  out.push('- **One machine.** NTFS plus whatever antivirus is configured here; the tails are');
-  out.push('  mostly Defender and not mostly this library. Treat p99 as environment, p50 as code.');
+  out.push('- **One machine.** NTFS plus whatever antivirus is configured here. Do not read');
+  out.push('  p50 as "the code": consecutive full runs of this file have moved the incumbent\'s');
+  out.push('  `lock + unlock` p50 by roughly 1.6x with no change on that side at all, so p50 drifts');
+  out.push('  by tens of percent too. Re-run before quoting a number, and prefer the ratio between');
+  out.push('  rows within one run over any single row compared across runs.');
   out.push('- **The latency rows are not the point.** A lease is taken once per editing task, so');
   out.push('  even a 10x difference is invisible next to an agent turn. They are here because a');
   out.push('  correctness claim that costs 100ms would be a bad trade, not to win a race.');
@@ -448,28 +488,36 @@ async function main(): Promise<void> {
   out.push('');
   out.push('## What the safety costs');
   out.push('');
+  const ms = (n: number): string => `${(n / 1000).toFixed(2)} ms`;
   out.push(
     'Stated plainly, because a comparison that only ever shows the favourable half is not a ' +
-      'comparison: the incumbent did `lock + unlock` in **~0.8 ms p50** while a fenced ' +
-      '`acquire + release` took **~7.5 ms p50** with fsync on and **~1.8 ms** with it off. ' +
-      'A lease here is a directory of immutable claims, each one created exclusively and ' +
-      'flushed, plus a tombstone on release and a directory scan on every read -- that is what ' +
-      'buys the refusal-at-write-time property, and it is roughly an order of magnitude more ' +
-      'expensive than a lockfile whose answer is only "is something stale-looking sitting here".'
+      'comparison: the incumbent did `lock + unlock` in **' + ms(incumbent.p50) + '** p50 while a ' +
+      'fenced `acquire + release` took **' + ms(durable.cold) + '** with claims flushed (and **' +
+      ms(volatile.cold) + '** with `flush: false`). A lease here is a directory of immutable ' +
+      'claims, each one created exclusively, plus a tombstone on release and a directory scan on ' +
+      'every read -- that is what buys the refusal-at-write-time property, and it is roughly an ' +
+      'order of magnitude more expensive than a lockfile whose answer is only "is something ' +
+      'stale-looking sitting here". The gate read is the cheap part, at **' + ms(durable.gate) +
+      '** p50, because it only looks.'
   );
   out.push('');
   out.push('Two consequences, both worth internalizing:');
   out.push('');
+  const bestRate = Math.max(...contention.rates);
+  const worstRate = Math.min(...contention.rates);
   out.push(
-    '- At ~58 serialized operations/second on one hot resource, this is a tool for claiming a ' +
-      'migration or a port, not for guarding an inner loop. Nobody should put it in a per-file ' +
-      'write path at this cost.'
+    `- One hot resource serialized to **${worstRate.toFixed(0)}-${bestRate.toFixed(0)} operations ` +
+      'per second** across the concurrency levels above. This is a tool for claiming a migration ' +
+      'or a port, not for guarding an inner loop; nobody should put it in a per-file write path at ' +
+      'this cost.'
   );
   out.push(
-    '- The tombstone written on release is the second-most expensive step and arguably does not ' +
-      'need its own fsync: losing it costs a generation number, not safety. Dropping that one ' +
-      'flush is the obvious next measurement, and it is listed as unmeasured rather than assumed ' +
-      'to help.'
+    '- The tombstone written on release is deliberately **not** flushed, while every claim is. ' +
+      'That asymmetry is already reflected in the numbers above; why it is safe, and why a claim ' +
+      'losing its flush is not, is argued in `docs/design-01-lease-and-fence.md` under "Which ' +
+      'fsyncs are load-bearing" and pinned by `test/durability.test.ts`. No before/after figure is ' +
+      'restated here, because this file cannot measure the old code -- and a typed number inside a ' +
+      'generated document is exactly the rot the generated document exists to avoid.'
   );
 
   fs.writeFileSync(OUT, out.join('\n') + '\n');

@@ -112,6 +112,40 @@ makes unexpired leases look expired. What bounds the damage is not clock logic, 
 fence — a lease taken wrongly is superseded, and the party that was wrongly evicted is
 refused when it tries to write. Renewing at `ttl/3` keeps the practical window small.
 
+## Which fsyncs are load-bearing
+
+Dropping one flush took `acquire + release` from ~6.9 ms to ~3.8 ms p50 (three
+independent trials, spread ±1.2%). The interesting part is not the speedup. It is
+that the obvious version of this optimization -- "fsync is slow, make it optional" --
+would have introduced a data-loss bug, and the two halves are only safe in
+combination.
+
+- **A claim's flush is load-bearing.** If the file vanishes with the power, the next
+  grantor computes a lower maximum and creates *the same generation number*. The
+  running holder and the new one then both present a token the store accepts: two
+  authorized holders, which is the single outcome this library exists to prevent.
+- **A tombstone's flush is not.** Losing it falls back to the released claim, which
+  is still marked live, so the next contender waits for that deadline. That is
+  bounded liveness, visible in `status`, not corruption. And when the freed number is
+  handed out again afterwards, reuse is harmless *because a tombstone is already
+  expired, so that generation never authorized a write and nothing can still hold it*.
+- **The garbage collection is the part that was dangerous.** Sweeping unlinks the
+  released claim, and an unlink is no more durable than a write. Sweep on release and
+  then lose the tombstone to a power failure *while the unlink survives*, and the
+  directory is empty: numbering restarts at 1, which is exactly the stale holder's
+  token, and its abandoned write is re-authorized. So collection now happens only
+  immediately after a durable claim has become the maximum -- the one moment where it
+  is provably safe -- and never in `release`.
+
+`test/durability.test.ts` pins all three, including the mirror case: it deletes a
+claim file to show that a rival then receives the *identical* number and both pass
+`check()`. That test asserts the hazard rather than a guarantee, because the
+guarantee is the flush.
+
+The net effect is that durability here is not a flag with one setting. Claims are
+flushed; tombstones are not; and where collection is allowed to run is a safety
+decision dressed as a cleanup one.
+
 ## What this does not do
 
 - **It does not make the check-then-write sequence atomic.** `check(token)` followed by an

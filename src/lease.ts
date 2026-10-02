@@ -268,6 +268,11 @@ function attempt(
   // fence contradicts.
   if (!isCommittedNewest(s, key, next, holderId)) return { kind: 'retry' };
 
+  // Safe to collect garbage here and only here: our claim at `next` is durable and
+  // is the highest number on the volume, so removing anything below it cannot make
+  // the fence forget how far it counted.
+  sweepByKey(s, key);
+
   return {
     kind: 'acquired',
     lease: {
@@ -389,6 +394,22 @@ export function check(s: Store, resource: Resource, token: number): boolean {
  * A release by a process that is no longer the newest is a no-op: that claim is
  * somebody else's to give up, and deleting it would hand their resource to a
  * third agent.
+ *
+ * The tombstone is written **without** a flush, unlike a claim. The asymmetry is
+ * deliberate and was reasoned through rather than guessed, because the easy
+ * version of this optimization -- "fsync is slow, drop it" -- is wrong:
+ *
+ *  - Losing a *claim* is unsafe. If the file is gone after a power failure, the
+ *    next grantor computes a lower maximum and creates the very same generation
+ *    number, so the running holder and the new one both present a token the store
+ *    accepts. Two authorized holders is the one outcome this library cannot allow,
+ *    so claims keep their flush.
+ *  - Losing a *tombstone* costs liveness only. The store falls back to the
+ *    released claim, still marked live, so the next contender waits for that
+ *    deadline instead of entering immediately. Bounded, and visible in `status`.
+ *  - Reusing the tombstone's number afterwards is safe by construction: a
+ *    tombstone is already expired, so that generation never authorized a write and
+ *    nothing can still be holding it.
  */
 export function release(s: Store, lease: Lease): void {
   const key = lease.resourceKey;
@@ -404,8 +425,17 @@ export function release(s: Store, lease: Lease): void {
     grantedAtMs: nowMs,
     expiresAtMs: nowMs, // not greater than now, so nobody reads it as live
   };
-  writeNew(genFile(claimDir(s, key), tombstone.token), encode(tombstone), s.flush);
-  sweepByKey(s, key);
+  // flush=false: the third bullet above is why that is allowed here and nowhere else.
+  writeNew(genFile(claimDir(s, key), tombstone.token), encode(tombstone), false);
+  // And deliberately no sweep here.
+  //
+  // Sweeping unlinks the claim we just released, and an unlink is no more durable
+  // than a write. If the tombstone above is then lost to a power failure *and* the
+  // unlink survives, the directory is empty and the next grantor restarts numbering
+  // at 1 -- which is exactly the released holder's token, so its stale write would
+  // be re-authorized. A sweep is only safe after the highest number on the volume
+  // is a durable claim, which is why it happens in the acquire and renew paths and
+  // not here.
 }
 
 /**

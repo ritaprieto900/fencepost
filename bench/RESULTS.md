@@ -9,7 +9,7 @@ platform    win32 10.0.26300 (x64)
 cpu         Intel(R) Core(TM) Ultra 9 185H x 22
 memory      31.4 GB
 tmp volume  C:\Users\34964\AppData\Local\Temp
-date        2026-10-02T10:27:08.138Z
+date        2026-10-02T10:56:25.453Z
 iterations  400 per row, 40 warmup (150 for the async incumbent row)
 ```
 
@@ -21,29 +21,29 @@ All times in microseconds unless the cell says `ms`.
 
 | operation | p50 | p95 | p99 | min | max |
 | --- | --- | --- | --- | --- | --- |
-| check (fence gate read) | 71 | 119 | 172 | 61 | 546 |
-| renew (self-supersede) | 10430 | 13517 | 14689 | 9281 | 77974 |
-| acquire + release (cold resource) | 6905 | 8568 | 9859 | 6233 | 54804 |
-| claim refused while held | 513 | 513 | 513 | 513 | 513 |
+| check (fence gate read) | 78 | 212 | 622 | 63 | 827 |
+| renew (self-supersede) | 7935 | 10483 | 11627 | 6868 | 19060 |
+| acquire + release (cold resource) | 4832 | 6147 | 6842 | 3618 | 7835 |
+| claim refused while held | 782 | 782 | 782 | 782 | 782 |
 
 ### fsync off (process-crash safe only)
 
 | operation | p50 | p95 | p99 | min | max |
 | --- | --- | --- | --- | --- | --- |
-| check (fence gate read) | 95 | 189 | 248 | 58 | 452 |
-| renew (self-supersede) | 2439 | 4174 | 5589 | 1526 | 8807 |
-| acquire + release (cold resource) | 1583 | 2640 | 3430 | 956 | 15512 |
-| claim refused while held | 1009 | 1009 | 1009 | 1009 | 1009 |
+| check (fence gate read) | 110 | 268 | 462 | 58 | 516 |
+| renew (self-supersede) | 2616 | 4236 | 5038 | 1452 | 6017 |
+| acquire + release (cold resource) | 1575 | 2382 | 3203 | 819 | 25670 |
+| claim refused while held | 701 | 701 | 701 | 701 | 701 |
 
 ### proper-lockfile (the incumbent)
 
 | operation | p50 | p95 | p99 | min | max |
 | --- | --- | --- | --- | --- | --- |
-| lock + unlock (their API) | 876 | 1268 | 1325 | 535 | 1446 |
+| lock + unlock (their API) | 1173 | 1804 | 2464 | 965 | 2750 |
 
 Observations from its own API surface:
 
-- `proper-lockfile` locking a **not-yet-existing** file with default options: rejected: ENOENT: no such file or directory, lstat 'C:\Users\34964\AppData\Local\Temp\fp-bench-incumbent-PIOjFq\about-to-be-created.txt'.
+- `proper-lockfile` locking a **not-yet-existing** file with default options: rejected: ENOENT: no such file or directory, lstat 'C:\Users\34964\AppData\Local\Temp\fp-bench-incumbent-7lfwGv\about-to-be-created.txt'.
 - `stale` has a **minimum of 5000ms** in their API, so 5s is the fastest takeover window they will accept.
 
 ## Contention throughput
@@ -54,10 +54,10 @@ until contention overhead dominates.
 
 | workers | rounds each | total ops | ops | seconds/op |
 | --- | --- | --- | --- | --- |
-| 2 | 60 | 120 | 120 | 58.5 | 17.10 |
-| 4 | 30 | 120 | 120 | 57.5 | 17.39 |
-| 8 | 15 | 120 | 120 | 60.1 | 16.63 |
-| 16 | 8 | 128 | 128 | 58.6 | 17.08 |
+| 2 | 60 | 120 | 120 | 73.7 | 13.58 |
+| 4 | 30 | 120 | 120 | 71.1 | 14.06 |
+| 8 | 15 | 120 | 120 | 68.0 | 14.71 |
+| 16 | 8 | 128 | 128 | 60.6 | 16.49 |
 
 ## The wedged-holder comparison
 
@@ -66,12 +66,15 @@ written around, and then resumes and does something.
 
 - **fencepost** — holder process: `LOCKED token=1`, then wedged 9s past its 5s ttl. Successor process printed: `TOOK token=2`. Wedged holder, after resuming, printed: `AFTER_RESUME check=false renew=lost`.
 - **proper-lockfile** — holder locked with `stale: 5000, update: 1000`, then wedged its event loop 9s; rival locked the same path while it was wedged and held on. Rival printed: `STOLEN`. Holder after resuming printed: `COMPROMISED=false RELEASE=released LOCKFILE_BEFORE=true LOCKFILE_AFTER=false`.
-- _Reading, not measurement:_ read the two lines above as one sequence. The rival took the lock while the original holder was wedged, so for a window two processes both believed they held the path; then the original holder resumed, was never told (`COMPROMISED=false`), and its `release()` deleted the lockfile that belonged to the rival (`BEFORE=true AFTER=false`) -- unlocking a resource it no longer held, while the live holder kept believing it was protected. Nothing in that sequence is a bug in `proper-lockfile` that its maintainers deny: their own README lists "updates take longer than expected, possibly causing the lock to become stale" as a known cause of two locks on one file. It is the reason a fence token exists. A holder carrying a generation number has nothing equivalent to do: the successor's number is higher, so the wedged holder's write is refused at the gate and its release is a no-op, whether or not it ever learns what happened. The asymmetry is not that one detects staleness and the other does not -- it is *when* a stale holder is stopped: at its next refresh, or at the write itself.
+- _Reading, not measurement:_ the rival entered while the original holder was wedged, so for a window two processes both believed they held the path; the original holder was never told (`COMPROMISED=false` above); and its `release()` removed the lockfile belonging to the rival -- unlocking a resource it no longer held, while the live holder kept believing it was protected. None of this is a bug that `proper-lockfile` denies: its own README lists "updates take longer than expected, possibly causing the lock to become stale" as a known route to two locks on one file. What a fence changes is *when* a stale holder is stopped. A generation number is presented at the write, so a superseded holder is refused there whether or not it ever notices; an mtime is consulted on the refresh schedule, so a holder that mutates before its next refresh has nothing to check against.
 
 ## Read these numbers with
 
-- **One machine.** NTFS plus whatever antivirus is configured here; the tails are
-  mostly Defender and not mostly this library. Treat p99 as environment, p50 as code.
+- **One machine.** NTFS plus whatever antivirus is configured here. Do not read
+  p50 as "the code": consecutive full runs of this file have moved the incumbent's
+  `lock + unlock` p50 by roughly 1.6x with no change on that side at all, so p50 drifts
+  by tens of percent too. Re-run before quoting a number, and prefer the ratio between
+  rows within one run over any single row compared across runs.
 - **The latency rows are not the point.** A lease is taken once per editing task, so
   even a 10x difference is invisible next to an agent turn. They are here because a
   correctness claim that costs 100ms would be a bad trade, not to win a race.
@@ -83,9 +86,9 @@ written around, and then resumes and does something.
 
 ## What the safety costs
 
-Stated plainly, because a comparison that only ever shows the favourable half is not a comparison: the incumbent did `lock + unlock` in **~0.8 ms p50** while a fenced `acquire + release` took **~7.5 ms p50** with fsync on and **~1.8 ms** with it off. A lease here is a directory of immutable claims, each one created exclusively and flushed, plus a tombstone on release and a directory scan on every read -- that is what buys the refusal-at-write-time property, and it is roughly an order of magnitude more expensive than a lockfile whose answer is only "is something stale-looking sitting here".
+Stated plainly, because a comparison that only ever shows the favourable half is not a comparison: the incumbent did `lock + unlock` in **1.17 ms** p50 while a fenced `acquire + release` took **4.83 ms** with claims flushed (and **1.57 ms** with `flush: false`). A lease here is a directory of immutable claims, each one created exclusively, plus a tombstone on release and a directory scan on every read -- that is what buys the refusal-at-write-time property, and it is roughly an order of magnitude more expensive than a lockfile whose answer is only "is something stale-looking sitting here". The gate read is the cheap part, at **0.08 ms** p50, because it only looks.
 
 Two consequences, both worth internalizing:
 
-- At ~58 serialized operations/second on one hot resource, this is a tool for claiming a migration or a port, not for guarding an inner loop. Nobody should put it in a per-file write path at this cost.
-- The tombstone written on release is the second-most expensive step and arguably does not need its own fsync: losing it costs a generation number, not safety. Dropping that one flush is the obvious next measurement, and it is listed as unmeasured rather than assumed to help.
+- One hot resource serialized to **61-74 operations per second** across the concurrency levels above. This is a tool for claiming a migration or a port, not for guarding an inner loop; nobody should put it in a per-file write path at this cost.
+- The tombstone written on release is deliberately **not** flushed, while every claim is. That asymmetry is already reflected in the numbers above; why it is safe, and why a claim losing its flush is not, is argued in `docs/design-01-lease-and-fence.md` under "Which fsyncs are load-bearing" and pinned by `test/durability.test.ts`. No before/after figure is restated here, because this file cannot measure the old code -- and a typed number inside a generated document is exactly the rot the generated document exists to avoid.
